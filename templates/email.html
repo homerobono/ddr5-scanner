@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family:'Segoe UI',Arial,sans-serif;max-width:800px;margin:0 auto;padding:16px;background:#f8fafc;color:#1e293b">
+    <div style="background:linear-gradient(135deg,#1e40af,#3b82f6);padding:24px;border-radius:12px 12px 0 0">
+        <h1 style="color:white;margin:0;font-size:22px">DDR5 CL30 Deal Alert</h1>
+        <p style="color:#bfdbfe;margin:8px 0 0 0;font-size:14px">
+            {{ match_count }} deal{{ 's' if match_count != 1 else '' }} found below R$ {{ "%.2f"|format(threshold) }}
+        </p>
+    </div>
+
+    <div style="background:white;padding:20px;border-radius:0 0 12px 12px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+        <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <thead>
+                <tr style="background:#f1f5f9;border-bottom:2px solid #e2e8f0">
+                    <th style="padding:10px;text-align:left">Product</th>
+                    <th style="padding:10px;text-align:right">Price</th>
+                    <th style="padding:10px;text-align:center">Store</th>
+                    <th style="padding:10px;text-align:center">Confidence</th>
+                    <th style="padding:10px;text-align:center">Condition</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in matches %}
+                <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px">
+                        {% if m.listing.image_url %}
+                        <img src="{{ m.listing.image_url }}" alt="" style="width:40px;height:40px;object-fit:contain;vertical-align:middle;margin-right:8px;border-radius:4px">
+                        {% endif %}
+                        <a href="{{ m.listing.url }}" style="color:#2563eb;text-decoration:none;font-weight:500">
+                            {{ m.listing.title[:80] }}{% if m.listing.title|length > 80 %}...{% endif %}
+                        </a>
+                        {% if m.brand %}
+                        <br><span style="color:#64748b;font-size:12px">{{ m.brand }} {{ m.model }}</span>
+                        {% endif %}
+                        {% if m.capacity_gb %}
+                        <br><span style="color:#64748b;font-size:12px">
+                            {{ m.capacity_gb }}GB
+                            {% if m.speed_mhz %} | {{ m.speed_mhz }}MHz{% endif %}
+                            {% if m.cas_latency %} | CL{{ m.cas_latency }}{% endif %}
+                            {% if m.kit_count > 1 %} ({{ m.kit_count }}x kit){% endif %}
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td style="padding:10px;text-align:right;font-weight:bold;color:#16a34a;white-space:nowrap">
+                        R$ {{ "%.2f"|format(m.listing.price) }}
+                    </td>
+                    <td style="padding:10px;text-align:center">
+                        <span style="background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px;font-size:12px;white-space:nowrap">
+                            {{ m.listing.source }}
+                        </span>
+                    </td>
+                    <td style="padding:10px;text-align:center">
+                        {% set conf_pct = (m.confidence * 100)|int %}
+                        {% if conf_pct >= 80 %}
+                        <span style="color:#16a34a;font-weight:bold">{{ conf_pct }}%</span>
+                        {% elif conf_pct >= 60 %}
+                        <span style="color:#ca8a04;font-weight:bold">{{ conf_pct }}%</span>
+                        {% else %}
+                        <span style="color:#dc2626;font-weight:bold">{{ conf_pct }}%</span>
+                        {% endif %}
+                    </td>
+                    <td style="padding:10px;text-align:center;font-size:12px">
+                        {% if m.listing.condition == 'new' %}
+                        <span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:12px">New</span>
+                        {% else %}
+                        <span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:12px">Used</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 16px 0">
+
+        <h4 style="color:#475569;margin:0 0 8px 0;font-size:13px">Scraper Status</h4>
+        <table style="font-size:12px;color:#64748b">
+            {% for source, status in scraper_status.items() %}
+            <tr>
+                <td style="padding:2px 12px 2px 0;font-weight:500">{{ source }}</td>
+                <td style="padding:2px 0">
+                    {% if status == 'OK' %}
+                    <span style="color:#16a34a">OK</span>
+                    {% else %}
+                    <span style="color:#dc2626">{{ status }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+
+        <p style="color:#94a3b8;font-size:11px;margin-top:20px;text-align:center">
+            DDR5 CL30 Scanner &mdash; automated price monitoring
+        </p>
+    </div>
+</body>
+</html>

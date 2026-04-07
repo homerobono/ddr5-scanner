@@ -1,0 +1,34 @@
+price_threshold_brl: 600.00
+search_queries:
+  - "memoria ddr5 cl30"
+  - "ddr5 6000 cl30"
+  - "ddr5 cl30 16gb"
+  - "ddr5 cl30 32gb"
+min_capacity_gb: 16
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3"
+  timeout: 60
+
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+
+scrapers:
+  enabled:
+    - kabum
+    - pichau
+    - terabyte
+    - mercadolivre
+    - enjoei
+    - facebook
+    - amazon
+    - olx
+    - aliexpress
+    - google_shopping
+  request_delay_seconds: 2
+  headless: true
+
+database:
+  path: "data/scanner.db"
