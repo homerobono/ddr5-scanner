@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
@@ -19,7 +22,6 @@ SCRAPER_REGISTRY: dict[str, type] = {}
 
 
 def _register_scrapers() -> None:
-    from scrapers.aliexpress import AliExpressScraper
     from scrapers.amazon import AmazonScraper
     from scrapers.enjoei import EnjoeiScraper
     from scrapers.facebook import FacebookScraper
@@ -40,7 +42,6 @@ def _register_scrapers() -> None:
             "facebook": FacebookScraper,
             "amazon": AmazonScraper,
             "olx": OLXScraper,
-            "aliexpress": AliExpressScraper,
             "google_shopping": GoogleShoppingScraper,
         }
     )
@@ -184,6 +185,26 @@ def _print_offers_summary(all_listings: list[Listing]) -> None:
     console.print()
     console.print(table)
     console.print(f"\n[bold]Total offers: {len(all_listings)}[/bold]\n")
+
+    _save_offers_csv(all_listings)
+
+
+def _save_offers_csv(all_listings: list[Listing]) -> None:
+    log = get_logger("main")
+    output_dir = Path("data")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filepath = output_dir / f"offers_{timestamp}.txt"
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["#", "Source", "Title", "Price (R$)", "URL"])
+        for idx, listing in enumerate(all_listings, start=1):
+            price_str = f"{listing.price:.2f}" if listing.price is not None else ""
+            writer.writerow([idx, listing.source, listing.title, price_str, listing.url])
+
+    log.info(f"Summary saved to {filepath}")
 
 
 if __name__ == "__main__":

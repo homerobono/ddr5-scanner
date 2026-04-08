@@ -1,4 +1,4 @@
-price_threshold_brl: 1200.00
+price_threshold_brl: 1500.00
 search_queries:
   - "memoria ddr5 cl30"
   - "ddr5 6000 cl30"
@@ -25,7 +25,6 @@ scrapers:
     - facebook
     - amazon
     - olx
-    - aliexpress
     - google_shopping
   request_delay_seconds: 2
   headless: true
