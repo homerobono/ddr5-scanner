@@ -75,7 +75,7 @@ class TerabyteScraper(BaseScraper):
 
         try:
             await page.wait_for_selector(
-                ".pbox, .product-item, .product-card",
+                "#prodarea .pbox, .products-area .pbox",
                 timeout=10000,
             )
         except Exception:
@@ -88,7 +88,11 @@ class TerabyteScraper(BaseScraper):
         html = await page.content()
         soup = BeautifulSoup(html, "lxml")
 
-        cards = soup.select(".pbox, .product-item, .product-card")
+        products_area = soup.select_one("#prodarea, .products-area")
+        if products_area:
+            cards = products_area.select(".pbox")
+        else:
+            cards = soup.select(".pbox")
 
         for card in cards:
             try:
@@ -100,7 +104,9 @@ class TerabyteScraper(BaseScraper):
                 self.log.debug(f"Failed to parse card: {exc}")
 
     def _parse_card(self, card: BeautifulSoup) -> Listing | None:
-        link_el = card.select_one("a[href]")
+        link_el = card.select_one("a[href*='/produto/']")
+        if not link_el:
+            link_el = card.select_one("a[href]")
         if not link_el:
             return None
 
@@ -110,16 +116,28 @@ class TerabyteScraper(BaseScraper):
         if not href.startswith("http"):
             href = f"{self.BASE_URL}{href}"
 
-        title_el = card.select_one("h2.prod-name, .prod-name, h2")
+        title_el = card.select_one("h2.prod-name, .prod-name, h2, a[title]")
         title = title_el.get_text(strip=True) if title_el else ""
+        if not title and link_el.get("title"):
+            title = link_el["title"]
         if not title:
             return None
 
         price_el = card.select_one(
-            ".prod-new-price, .val-prod, .prod-price"
+            ".prod-new-price span, .prod-new-price, "
+            ".val-prod, .prod-price, .price-destaque"
         )
         raw_price = price_el.get_text(strip=True) if price_el else ""
         price = self.parse_brl_price(raw_price)
+
+        if not price:
+            for el in card.select("span, div"):
+                text = el.get_text(strip=True)
+                if "R$" in text:
+                    price = self.parse_brl_price(text)
+                    if price:
+                        raw_price = text
+                        break
 
         img_el = card.select_one("img[src]")
         image_url = img_el["src"] if img_el else ""

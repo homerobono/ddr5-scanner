@@ -7,8 +7,8 @@ search_queries:
 min_capacity_gb: 16
 
 ollama:
-  base_url: "http://localhost:11434"
-  model: "llama3.1"
+  base_url: "http://192.168.0.110:11434"
+  model: "qwen2.5-coder:14b"
   timeout: 120
 
 email:

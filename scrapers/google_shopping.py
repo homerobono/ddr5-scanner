@@ -76,7 +76,10 @@ class GoogleShoppingScraper(BaseScraper):
             f"&gl=br&hl=pt-BR"
         )
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
         await asyncio.sleep(2)
 
         # Accept cookies if banner appears

@@ -82,7 +82,10 @@ class PichauScraper(BaseScraper):
                 self.log.warning(f"Still 403 for '{query}', skipping")
                 return
 
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
         await asyncio.sleep(2)
 
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")

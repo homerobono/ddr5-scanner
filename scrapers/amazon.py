@@ -81,7 +81,10 @@ class AmazonScraper(BaseScraper):
                 self.log.warning(f"Still {resp.status} for '{query}', skipping")
                 return
 
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
         await asyncio.sleep(2)
 
         # Handle CAPTCHA page by waiting
