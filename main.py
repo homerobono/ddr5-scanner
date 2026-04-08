@@ -51,20 +51,23 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-async def run_scraper(scraper_cls: type, config: dict) -> ScraperResult:
+async def run_scraper(
+    scraper_cls: type, config: dict, sem: asyncio.Semaphore
+) -> ScraperResult:
     log = get_logger("main")
     name = scraper_cls.__name__
-    start = time.monotonic()
-    try:
-        scraper = scraper_cls(config)
-        listings = await scraper.search()
-        elapsed = time.monotonic() - start
-        log.info(f"{name}: found {len(listings)} raw listings ({elapsed:.1f}s)")
-        return ScraperResult(source=name, listings=listings, error=None)
-    except Exception as exc:
-        elapsed = time.monotonic() - start
-        log.error(f"{name}: FAILED after {elapsed:.1f}s - {exc}")
-        return ScraperResult(source=name, listings=[], error=str(exc))
+    async with sem:
+        start = time.monotonic()
+        try:
+            scraper = scraper_cls(config)
+            listings = await scraper.search()
+            elapsed = time.monotonic() - start
+            log.info(f"{name}: found {len(listings)} raw listings ({elapsed:.1f}s)")
+            return ScraperResult(source=name, listings=listings, error=None)
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            log.error(f"{name}: FAILED after {elapsed:.1f}s - {exc}")
+            return ScraperResult(source=name, listings=[], error=str(exc))
 
 
 async def main() -> None:
@@ -84,8 +87,11 @@ async def main() -> None:
 
     log.info(f"Starting scan with {len(scrapers_to_run)} scrapers...")
 
+    # Limit concurrent browser instances to avoid overwhelming the system
+    browser_sem = asyncio.Semaphore(3)
+
     results: list[ScraperResult] = await asyncio.gather(
-        *(run_scraper(cls, config) for cls in scrapers_to_run)
+        *(run_scraper(cls, config, browser_sem) for cls in scrapers_to_run)
     )
 
     all_listings: list[Listing] = []
@@ -106,6 +112,7 @@ async def main() -> None:
         if not new_listings:
             log.info("No new listings to classify. Done.")
             _print_status(log, scraper_status)
+            _print_offers_summary(all_listings)
             return
 
         classifier = OllamaClassifier(config)
@@ -133,6 +140,7 @@ async def main() -> None:
             log.info("No matches found below threshold. No email sent.")
 
         _print_status(log, scraper_status)
+        _print_offers_summary(all_listings)
     finally:
         db.close()
 
@@ -141,6 +149,41 @@ def _print_status(log, scraper_status: dict[str, str]) -> None:
     log.info("Scraper status summary:")
     for source, status in scraper_status.items():
         log.info(f"  {source}: {status}")
+
+
+def _print_offers_summary(all_listings: list[Listing]) -> None:
+    from rich.table import Table
+    from utils.logging import console
+
+    if not all_listings:
+        console.print("\n[bold yellow]No offers found.[/bold yellow]\n")
+        return
+
+    table = Table(
+        title="Offers Found",
+        title_style="bold cyan",
+        show_lines=True,
+        expand=False,
+    )
+    table.add_column("#", style="dim", justify="right", width=4)
+    table.add_column("Source", style="magenta", width=14)
+    table.add_column("Title", style="white", max_width=60, no_wrap=False)
+    table.add_column("Price (R$)", style="green", justify="right", width=12)
+    table.add_column("URL", style="blue", max_width=60, no_wrap=False)
+
+    for idx, listing in enumerate(all_listings, start=1):
+        price_str = f"R$ {listing.price:,.2f}" if listing.price is not None else "N/A"
+        table.add_row(
+            str(idx),
+            listing.source,
+            listing.title,
+            price_str,
+            listing.url,
+        )
+
+    console.print()
+    console.print(table)
+    console.print(f"\n[bold]Total offers: {len(all_listings)}[/bold]\n")
 
 
 if __name__ == "__main__":

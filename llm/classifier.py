@@ -23,7 +23,7 @@ Common model number patterns:
 - Corsair Vengeance: CMK32GX5M2B6000C30 = DDR5 6000 CL30
 
 Reply ONLY with a JSON object (no other text):
-{"is_match": true/false, "confidence": 0.0-1.0, "reason": "brief explanation"}
+{{"is_match": true, "confidence": 0.95, "reason": "brief explanation"}}
 
 Title: {title}
 Description: {description}
@@ -32,9 +32,9 @@ Price: {raw_price}"""
 EXTRACTION_PROMPT = """\
 Extract structured product details from this DDR5 memory listing.
 Reply ONLY with a JSON object (no other text):
-{{"brand": "string", "model": "string", "capacity_gb": integer, \
-"speed_mhz": integer_or_null, "cas_latency": integer_or_null, \
-"kit_count": integer, "condition": "new|used"}}
+{{"brand": "string", "model": "string", "capacity_gb": 16, \
+"speed_mhz": 6000, "cas_latency": 30, \
+"kit_count": 1, "condition": "new"}}
 
 Title: {title}
 Description: {description}
@@ -52,10 +52,9 @@ class OllamaClassifier:
     async def classify_and_extract(
         self, listings: list[Listing]
     ) -> list[ClassifiedListing]:
-        results: list[ClassifiedListing] = []
         sem = asyncio.Semaphore(3)
 
-        async def process(listing: Listing) -> ClassifiedListing:
+        async def process(listing: Listing) -> ClassifiedListing | None:
             async with sem:
                 return await self._process_single(listing)
 
@@ -66,31 +65,49 @@ class OllamaClassifier:
         for r in results:
             if isinstance(r, Exception):
                 self.log.warning(f"Classification failed: {r}")
-            else:
+            elif r is not None:
                 classified.append(r)
 
         return classified
 
-    async def _process_single(self, listing: Listing) -> ClassifiedListing:
-        classification = await self._classify(listing)
+    async def _process_single(self, listing: Listing) -> ClassifiedListing | None:
+        try:
+            classification = await self._classify(listing)
+        except Exception as exc:
+            self.log.debug(f"Classification error for '{listing.title[:50]}': {exc}")
+            return None
+
+        is_match = classification.get("is_match", False)
+        if isinstance(is_match, str):
+            is_match = is_match.lower() in ("true", "yes", "1")
+
+        confidence = classification.get("confidence", 0.0)
+        if isinstance(confidence, str):
+            try:
+                confidence = float(confidence)
+            except ValueError:
+                confidence = 0.0
 
         result = ClassifiedListing(
             listing=listing,
-            is_match=classification.get("is_match", False),
-            confidence=classification.get("confidence", 0.0),
-            reason=classification.get("reason", ""),
+            is_match=bool(is_match),
+            confidence=confidence,
+            reason=str(classification.get("reason", "")),
         )
 
         if result.is_match and result.confidence >= 0.5:
-            extraction = await self._extract(listing)
-            result.brand = extraction.get("brand", "")
-            result.model = extraction.get("model", "")
-            result.capacity_gb = extraction.get("capacity_gb")
-            result.speed_mhz = extraction.get("speed_mhz")
-            result.cas_latency = extraction.get("cas_latency")
-            result.kit_count = extraction.get("kit_count", 1)
-            if extraction.get("condition"):
-                result.listing.condition = extraction["condition"]
+            try:
+                extraction = await self._extract(listing)
+                result.brand = str(extraction.get("brand", ""))
+                result.model = str(extraction.get("model", ""))
+                result.capacity_gb = extraction.get("capacity_gb")
+                result.speed_mhz = extraction.get("speed_mhz")
+                result.cas_latency = extraction.get("cas_latency")
+                result.kit_count = extraction.get("kit_count", 1)
+                if extraction.get("condition"):
+                    result.listing.condition = extraction["condition"]
+            except Exception as exc:
+                self.log.debug(f"Extraction error for '{listing.title[:50]}': {exc}")
 
         return result
 
@@ -116,6 +133,7 @@ class OllamaClassifier:
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {
                 "temperature": 0.1,
                 "num_predict": 256,
@@ -143,26 +161,33 @@ class OllamaClassifier:
 
     def _parse_json_response(self, text: str) -> dict:
         text = text.strip()
+        if not text:
+            return {}
 
-        # Try direct JSON parse
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
         except json.JSONDecodeError:
             pass
 
-        # Try extracting JSON from markdown code blocks or surrounding text
+        # Try extracting JSON object from surrounding text
         match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group())
+                parsed = json.loads(match.group())
+                if isinstance(parsed, dict):
+                    return parsed
             except json.JSONDecodeError:
                 pass
 
-        # Try extracting from ```json blocks
+        # Try extracting from markdown code blocks
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(1))
+                parsed = json.loads(match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
             except json.JSONDecodeError:
                 pass
 

@@ -1,10 +1,10 @@
-"""Enjoei scraper using HTTP requests + BeautifulSoup."""
+"""Enjoei scraper using Playwright for JS-rendered search results."""
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote_plus
 
-import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
@@ -18,34 +18,86 @@ class EnjoeiScraper(BaseScraper):
         listings: list[Listing] = []
         seen_urls: set[str] = set()
 
-        async with httpx.AsyncClient(
-            timeout=30, follow_redirects=True
-        ) as client:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.log.error(
+                "Playwright not installed. Run: pip install playwright && playwright install"
+            )
+            return []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=self.random_ua(),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers={
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+            )
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['pt-BR', 'pt', 'en']
+                });
+            """)
+
+            page = await context.new_page()
+
             for query in self.search_queries:
                 try:
-                    await self._search_query(client, query, listings, seen_urls)
+                    await self._search_query(page, query, listings, seen_urls)
                 except Exception as exc:
                     self.log.warning(f"Query '{query}' failed: {exc}")
                 await self.throttle()
+
+            await browser.close()
 
         return listings
 
     async def _search_query(
         self,
-        client: httpx.AsyncClient,
+        page,
         query: str,
         listings: list[Listing],
         seen_urls: set[str],
     ) -> None:
-        search_url = f"{self.BASE_URL}/s/{quote_plus(query)}"
-        resp = await self._request_with_retry(
-            client, "GET", search_url, headers=self.default_headers()
+        search_url = f"{self.BASE_URL}/busca/{quote_plus(query)}"
+        resp = await page.goto(
+            search_url, wait_until="domcontentloaded", timeout=30000
         )
-        soup = BeautifulSoup(resp.text, "lxml")
+
+        if resp and resp.status == 404:
+            # Try alternative URL pattern
+            search_url = f"{self.BASE_URL}/busca?q={quote_plus(query)}"
+            resp = await page.goto(
+                search_url, wait_until="domcontentloaded", timeout=30000
+            )
+
+        if resp and resp.status in (403, 404, 503):
+            self.log.debug(f"Enjoei returned {resp.status} for '{query}', skipping")
+            return
+
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(2)
+
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
 
         product_cards = soup.select(
             ".product-card, .ProductCard, [data-testid='product-card'], "
-            "a[href*='/p/']"
+            "a[href*='/p/'], a[href*='/produto/']"
         )
 
         for card in product_cards:

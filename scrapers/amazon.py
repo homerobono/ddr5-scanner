@@ -1,10 +1,10 @@
-"""Amazon BR scraper using HTTP requests + BeautifulSoup with UA rotation."""
+"""Amazon BR scraper using Playwright to bypass bot detection."""
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote_plus
 
-import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
@@ -18,54 +18,97 @@ class AmazonScraper(BaseScraper):
         listings: list[Listing] = []
         seen_urls: set[str] = set()
 
-        async with httpx.AsyncClient(
-            timeout=30, follow_redirects=True
-        ) as client:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.log.error(
+                "Playwright not installed. Run: pip install playwright && playwright install"
+            )
+            return []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=self.random_ua(),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers={
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+            )
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['pt-BR', 'pt', 'en']
+                });
+            """)
+
+            page = await context.new_page()
+
             for query in self.search_queries:
                 try:
-                    await self._search_query(client, query, listings, seen_urls)
+                    await self._search_query(page, query, listings, seen_urls)
                 except Exception as exc:
                     self.log.warning(f"Query '{query}' failed: {exc}")
                 await self.throttle()
+
+            await browser.close()
 
         return listings
 
     async def _search_query(
         self,
-        client: httpx.AsyncClient,
+        page,
         query: str,
         listings: list[Listing],
         seen_urls: set[str],
     ) -> None:
-        for page_num in range(1, 4):
-            url = f"{self.BASE_URL}/s?k={quote_plus(query)}&page={page_num}"
-            headers = self.default_headers()
-            headers["Accept-Encoding"] = "gzip, deflate, br"
+        url = f"{self.BASE_URL}/s?k={quote_plus(query)}&page=1"
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            resp = await self._request_with_retry(
-                client, "GET", url, headers=headers
-            )
-            soup = BeautifulSoup(resp.text, "lxml")
+        if resp and resp.status in (403, 503):
+            self.log.warning(f"Got {resp.status} for '{query}', waiting before retry...")
+            await asyncio.sleep(5)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if resp and resp.status in (403, 503):
+                self.log.warning(f"Still {resp.status} for '{query}', skipping")
+                return
 
-            cards = soup.select('[data-component-type="s-search-result"]')
-            if not cards:
-                break
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(2)
 
-            for card in cards:
-                try:
-                    listing = self._parse_card(card)
-                    if listing and listing.url not in seen_urls:
-                        seen_urls.add(listing.url)
-                        listings.append(listing)
-                except Exception as exc:
-                    self.log.debug(f"Failed to parse card: {exc}")
+        # Handle CAPTCHA page by waiting
+        captcha = await page.query_selector("form[action*='validateCaptcha']")
+        if captcha:
+            self.log.warning(f"CAPTCHA detected for '{query}', skipping")
+            return
 
-            await self.throttle()
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
+
+        cards = soup.select('[data-component-type="s-search-result"]')
+
+        for card in cards:
+            try:
+                listing = self._parse_card(card)
+                if listing and listing.url not in seen_urls:
+                    seen_urls.add(listing.url)
+                    listings.append(listing)
+            except Exception as exc:
+                self.log.debug(f"Failed to parse card: {exc}")
 
     def _parse_card(self, card: BeautifulSoup) -> Listing | None:
-        title_el = card.select_one(
-            "h2 a span, h2 span.a-text-normal"
-        )
+        title_el = card.select_one("h2 a span, h2 span.a-text-normal")
         title = title_el.get_text(strip=True) if title_el else ""
         if not title:
             return None
