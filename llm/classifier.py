@@ -52,11 +52,28 @@ class OllamaClassifier:
     async def classify_and_extract(
         self, listings: list[Listing]
     ) -> list[ClassifiedListing]:
+        total = len(listings)
+        self.log.info(f"Starting LLM classification of {total} listings...")
         sem = asyncio.Semaphore(3)
+        completed = 0
+        matches = 0
+        errors = 0
 
         async def process(listing: Listing) -> ClassifiedListing | None:
+            nonlocal completed, matches, errors
             async with sem:
-                return await self._process_single(listing)
+                result = await self._process_single(listing)
+                completed += 1
+                if result is None:
+                    errors += 1
+                elif result.is_match:
+                    matches += 1
+                self.log.info(
+                    f"[{completed}/{total}] "
+                    f"matches={matches} errors={errors} | "
+                    f"{listing.title[:60]}"
+                )
+                return result
 
         tasks = [process(listing) for listing in listings]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -68,6 +85,10 @@ class OllamaClassifier:
             elif r is not None:
                 classified.append(r)
 
+        self.log.info(
+            f"Classification complete: {len(classified)} classified, "
+            f"{matches} matches, {errors} errors out of {total}"
+        )
         return classified
 
     async def _process_single(self, listing: Listing) -> ClassifiedListing | None:

@@ -169,7 +169,7 @@ def _print_offers_summary(all_listings: list[Listing]) -> None:
     table.add_column("Source", style="magenta", width=14)
     table.add_column("Title", style="white", max_width=60, no_wrap=False)
     table.add_column("Price (R$)", style="green", justify="right", width=12)
-    table.add_column("URL", style="blue", max_width=60, no_wrap=False)
+    table.add_column("URL", style="blue", no_wrap=True, overflow="fold")
 
     for idx, listing in enumerate(all_listings, start=1):
         price_str = f"R$ {listing.price:,.2f}" if listing.price is not None else "N/A"
