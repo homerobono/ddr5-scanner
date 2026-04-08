@@ -8,7 +8,7 @@ min_capacity_gb: 16
 
 ollama:
   base_url: "http://localhost:11434"
-  model: "llama3"
+  model: "llama3.1"
   timeout: 60
 
 email:
