@@ -1,10 +1,10 @@
-"""Pichau scraper using HTTP requests + BeautifulSoup."""
+"""Pichau scraper using Playwright to bypass Cloudflare/WAF protection."""
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote_plus
 
-import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
@@ -18,30 +18,78 @@ class PichauScraper(BaseScraper):
         listings: list[Listing] = []
         seen_urls: set[str] = set()
 
-        async with httpx.AsyncClient(
-            timeout=30, follow_redirects=True, http2=True
-        ) as client:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.log.error(
+                "Playwright not installed. Run: pip install playwright && playwright install"
+            )
+            return []
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=self.random_ua(),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers={
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+            )
+
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['pt-BR', 'pt', 'en']
+                });
+            """)
+
+            page = await context.new_page()
+
             for query in self.search_queries:
                 try:
-                    await self._search_query(client, query, listings, seen_urls)
+                    await self._search_query(page, query, listings, seen_urls)
                 except Exception as exc:
                     self.log.warning(f"Query '{query}' failed: {exc}")
                 await self.throttle()
+
+            await browser.close()
 
         return listings
 
     async def _search_query(
         self,
-        client: httpx.AsyncClient,
+        page,
         query: str,
         listings: list[Listing],
         seen_urls: set[str],
     ) -> None:
         url = f"{self.BASE_URL}/catalogsearch/result/?q={quote_plus(query)}"
-        resp = await self._request_with_retry(
-            client, "GET", url, headers=self.default_headers()
-        )
-        soup = BeautifulSoup(resp.text, "lxml")
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        if resp and resp.status == 403:
+            self.log.warning(f"Got 403 for '{query}', waiting before retry...")
+            await asyncio.sleep(5)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if resp and resp.status == 403:
+                self.log.warning(f"Still 403 for '{query}', skipping")
+                return
+
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(2)
+
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
 
         product_cards = soup.select(
             '[data-testid="product-card"], .product-card, '
@@ -69,7 +117,9 @@ class PichauScraper(BaseScraper):
         if not href.startswith("http"):
             href = f"{self.BASE_URL}{href}"
 
-        title_el = card.select_one("h2, h3, .product-name, [data-testid='product-name']")
+        title_el = card.select_one(
+            "h2, h3, .product-name, [data-testid='product-name']"
+        )
         title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
         if not title:
             return None

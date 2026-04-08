@@ -13,11 +13,12 @@ import httpx
 from utils.logging import get_logger
 
 USER_AGENTS = [
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 ]
 
 
@@ -88,13 +89,17 @@ class BaseScraper(ABC):
         url: str,
         **kwargs: Any,
     ) -> httpx.Response:
+        retryable_statuses = {429, 403, 503}
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
                 resp = await client.request(method, url, **kwargs)
-                if resp.status_code == 429:
-                    wait = self.base_delay * (2**attempt) + random.uniform(0, 1)
-                    self.log.warning(f"Rate-limited (429), waiting {wait:.1f}s...")
+                if resp.status_code in retryable_statuses:
+                    wait = self.base_delay * (2 ** (attempt + 1)) + random.uniform(0, 2)
+                    self.log.warning(
+                        f"HTTP {resp.status_code} for {url}, "
+                        f"waiting {wait:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
+                    )
                     await asyncio.sleep(wait)
                     continue
                 resp.raise_for_status()

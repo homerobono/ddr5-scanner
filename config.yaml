@@ -1,4 +1,4 @@
-price_threshold_brl: 600.00
+price_threshold_brl: 1200.00
 search_queries:
   - "memoria ddr5 cl30"
   - "ddr5 6000 cl30"
@@ -9,7 +9,7 @@ min_capacity_gb: 16
 ollama:
   base_url: "http://localhost:11434"
   model: "llama3"
-  timeout: 60
+  timeout: 120
 
 email:
   smtp_host: "smtp.gmail.com"

@@ -1,10 +1,11 @@
-"""Terabyte Shop scraper using Selenium for JS rendering."""
+"""Terabyte Shop scraper using Playwright for JS rendering."""
 
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 from urllib.parse import quote_plus
+
+from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
 
@@ -17,95 +18,111 @@ class TerabyteScraper(BaseScraper):
         listings: list[Listing] = []
         seen_urls: set[str] = set()
 
-        for query in self.search_queries:
-            try:
-                results = await asyncio.get_event_loop().run_in_executor(
-                    None, partial(self._search_sync, query)
-                )
-                for listing in results:
-                    if listing.url not in seen_urls:
-                        seen_urls.add(listing.url)
-                        listings.append(listing)
-            except Exception as exc:
-                self.log.warning(f"Query '{query}' failed: {exc}")
-            await self.throttle()
-
-        return listings
-
-    def _search_sync(self, query: str) -> list[Listing]:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.webdriver.support.ui import WebDriverWait
-
-        options = Options()
-        if self.headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument(f"user-agent={self.random_ua()}")
-        options.add_argument("--lang=pt-BR")
-
-        driver = webdriver.Chrome(options=options)
-        listings: list[Listing] = []
-
         try:
-            url = f"{self.BASE_URL}/busca?str={quote_plus(query)}"
-            driver.get(url)
-
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".pbox"))
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self.log.error(
+                "Playwright not installed. Run: pip install playwright && playwright install"
             )
+            return []
 
-            cards = driver.find_elements(By.CSS_SELECTOR, ".pbox")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=self.random_ua(),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers={
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+            )
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['pt-BR', 'pt', 'en']
+                });
+            """)
 
-            for card in cards:
+            page = await context.new_page()
+
+            for query in self.search_queries:
                 try:
-                    listing = self._parse_card_selenium(card)
-                    if listing:
-                        listings.append(listing)
+                    await self._search_query(page, query, listings, seen_urls)
                 except Exception as exc:
-                    self.log.debug(f"Failed to parse card: {exc}")
+                    self.log.warning(f"Query '{query}' failed: {exc}")
+                await self.throttle()
 
-        finally:
-            driver.quit()
+            await browser.close()
 
         return listings
 
-    def _parse_card_selenium(self, card) -> Listing | None:
-        from selenium.webdriver.common.by import By
+    async def _search_query(
+        self,
+        page,
+        query: str,
+        listings: list[Listing],
+        seen_urls: set[str],
+    ) -> None:
+        url = f"{self.BASE_URL}/busca?str={quote_plus(query)}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         try:
-            link_el = card.find_element(By.CSS_SELECTOR, "a[href]")
-            href = link_el.get_attribute("href") or ""
+            await page.wait_for_selector(
+                ".pbox, .product-item, .product-card",
+                timeout=10000,
+            )
         except Exception:
+            self.log.debug(f"No product cards found for '{query}'")
+            return
+
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
+
+        cards = soup.select(".pbox, .product-item, .product-card")
+
+        for card in cards:
+            try:
+                listing = self._parse_card(card)
+                if listing and listing.url not in seen_urls:
+                    seen_urls.add(listing.url)
+                    listings.append(listing)
+            except Exception as exc:
+                self.log.debug(f"Failed to parse card: {exc}")
+
+    def _parse_card(self, card: BeautifulSoup) -> Listing | None:
+        link_el = card.select_one("a[href]")
+        if not link_el:
             return None
 
-        try:
-            title_el = card.find_element(By.CSS_SELECTOR, "h2.prod-name, .prod-name, h2")
-            title = title_el.text.strip()
-        except Exception:
-            title = ""
+        href = link_el.get("href", "")
+        if not href:
+            return None
+        if not href.startswith("http"):
+            href = f"{self.BASE_URL}{href}"
 
+        title_el = card.select_one("h2.prod-name, .prod-name, h2")
+        title = title_el.get_text(strip=True) if title_el else ""
         if not title:
             return None
 
-        try:
-            price_el = card.find_element(By.CSS_SELECTOR, ".prod-new-price, .val-prod, .prod-price")
-            raw_price = price_el.text.strip()
-        except Exception:
-            raw_price = ""
-
+        price_el = card.select_one(
+            ".prod-new-price, .val-prod, .prod-price"
+        )
+        raw_price = price_el.get_text(strip=True) if price_el else ""
         price = self.parse_brl_price(raw_price)
 
-        try:
-            img_el = card.find_element(By.CSS_SELECTOR, "img[src]")
-            image_url = img_el.get_attribute("src") or ""
-        except Exception:
-            image_url = ""
+        img_el = card.select_one("img[src]")
+        image_url = img_el["src"] if img_el else ""
 
         return Listing(
             source="terabyte",
