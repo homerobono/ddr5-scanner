@@ -35,23 +35,28 @@ class GoogleShoppingScraper(BaseScraper):
                     "--no-sandbox",
                 ],
             )
-            context = await browser.new_context(
-                user_agent=self.random_ua(),
-                locale="pt-BR",
-                timezone_id="America/Sao_Paulo",
-                viewport={"width": 1920, "height": 1080},
-                extra_http_headers={
-                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                },
-            )
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['pt-BR', 'pt', 'en']
-                });
-            """)
-
+            context = await self._create_stealth_context(browser)
             page = await context.new_page()
+
+            # Visit google.com.br first to get cookies
+            try:
+                await page.goto(
+                    "https://www.google.com.br", wait_until="domcontentloaded", timeout=10000
+                )
+                await asyncio.sleep(1)
+                # Dismiss cookie banner
+                try:
+                    accept_btn = await page.query_selector(
+                        "button[id*='accept'], button[id*='L2AGLb'], "
+                        "button[aria-label*='Aceitar']"
+                    )
+                    if accept_btn:
+                        await accept_btn.click()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
             for query in self.search_queries:
                 try:
@@ -77,38 +82,46 @@ class GoogleShoppingScraper(BaseScraper):
         )
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=8000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
-        # Accept cookies if banner appears
-        try:
-            accept_btn = await page.query_selector(
-                "button[id*='accept'], button[aria-label*='Aceitar']"
-            )
-            if accept_btn:
-                await accept_btn.click()
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(1)
+        # Scroll multiple times to trigger lazy loading
+        for _ in range(3):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(1)
 
         html = await page.content()
+        self._dump_debug_html(html, query)
         soup = BeautifulSoup(html, "lxml")
 
+        # Google Shopping uses obfuscated class names that change frequently;
+        # try multiple known patterns plus structural selectors
         cards = soup.select(
             ".sh-dgr__gr-auto, .sh-dlr__list-result, "
             "div[data-docid], .sh-pr__product-results-grid div[data-docid], "
-            ".KZmu8e, .i0X6df"
+            ".KZmu8e, .i0X6df, .u30d4, .sh-dgr__content"
         )
 
         if not cards:
-            cards = soup.select("div.sh-dgr__content, a[href*='/shopping/product/']")
+            cards = soup.select("a[href*='/shopping/product/']")
 
-        for card in cards[:30]:
+        if not cards:
+            # Broader fallback: find divs that look like product cards
+            # (contain both a link and a price-like text)
+            for div in soup.select("div"):
+                link = div.find("a", href=True)
+                text = div.get_text()
+                if link and "R$" in text and len(text) < 500:
+                    has_child_div_with_link = div.find("div") is not None
+                    if has_child_div_with_link:
+                        cards.append(div)
+            # Deduplicate by removing cards that are children of other cards
+            if cards:
+                cards = self._deduplicate_nested(cards)
+
+        for card in cards[:40]:
             try:
                 listing = self._parse_card(card)
                 if listing and listing.url not in seen_urls:
@@ -116,6 +129,19 @@ class GoogleShoppingScraper(BaseScraper):
                     listings.append(listing)
             except Exception as exc:
                 self.log.debug(f"Failed to parse card: {exc}")
+
+    def _deduplicate_nested(self, cards: list) -> list:
+        """Remove cards that are descendants of other cards in the list."""
+        result = []
+        for card in cards:
+            is_child = False
+            for other in cards:
+                if other is not card and other in card.parents:
+                    is_child = True
+                    break
+            if not is_child:
+                result.append(card)
+        return result[:40]
 
     def _parse_card(self, card: BeautifulSoup) -> Listing | None:
         link = card.find("a", href=True)
@@ -127,23 +153,45 @@ class GoogleShoppingScraper(BaseScraper):
             match = re.search(r"[?&]url=([^&]+)", href)
             if match:
                 href = unquote(match.group(1))
+        if href.startswith("/shopping/"):
+            href = f"https://www.google.com.br{href}"
         if not href.startswith("http"):
             href = f"https://www.google.com.br{href}"
 
-        title_el = card.select_one("h3, h4, .tAxDx, [data-name], .Xjkr3b")
+        title_el = card.select_one(
+            "h3, h4, .tAxDx, [data-name], .Xjkr3b, "
+            "[role='heading'], a[aria-label]"
+        )
         title = title_el.get_text(strip=True) if title_el else ""
         if not title:
-            title = link.get_text(strip=True)
+            title = link.get("aria-label") or link.get_text(strip=True)
         if not title:
             return None
 
+        # Find price: look for text containing R$
+        raw_price = ""
+        price = None
         price_el = card.select_one(
-            ".a8Pemb, .HRLxBb, [data-price], span b, .kHxwFf"
+            ".a8Pemb, .HRLxBb, [data-price], .kHxwFf, "
+            "span b, .sh-dgr__content .a8Pemb"
         )
-        raw_price = price_el.get_text(strip=True) if price_el else ""
-        price = self.parse_brl_price(raw_price)
+        if price_el:
+            raw_price = price_el.get_text(strip=True)
+            price = self.parse_brl_price(raw_price)
 
-        seller_el = card.select_one(".aULzUe, .IuHnof, .E5ocAb, .b5ycib")
+        if not price:
+            for el in card.select("span, b, div"):
+                text = el.get_text(strip=True)
+                if "R$" in text and len(text) < 30:
+                    parsed = self.parse_brl_price(text)
+                    if parsed:
+                        price = parsed
+                        raw_price = text
+                        break
+
+        seller_el = card.select_one(
+            ".aULzUe, .IuHnof, .E5ocAb, .b5ycib, .sh-dgr__content .E5ocAb"
+        )
         seller = seller_el.get_text(strip=True) if seller_el else ""
 
         img_el = card.select_one("img[src]")

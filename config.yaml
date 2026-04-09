@@ -4,6 +4,8 @@ search_queries:
   - "ddr5 6000 cl30"
   - "ddr5 cl30 16gb"
   - "ddr5 cl30 32gb"
+  - "memoria ddr5 6000"
+  - "memoria ram ddr5"
 min_capacity_gb: 16
 
 ollama:
@@ -28,6 +30,7 @@ scrapers:
     - google_shopping
   request_delay_seconds: 2
   headless: true
+  debug_html: true
 
 database:
   path: "data/scanner.db"

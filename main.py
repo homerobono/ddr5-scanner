@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from db.history import HistoryDB
 from llm.classifier import OllamaClassifier
 from notifications.email_notifier import EmailNotifier
-from scrapers.base import Listing, ScraperResult
+from scrapers.base import ClassifiedListing, Listing, ScraperResult
 from utils.logging import get_logger, setup_logging
 
 SCRAPER_REGISTRY: dict[str, type] = {}
@@ -142,6 +142,7 @@ async def main() -> None:
 
         _print_status(log, scraper_status)
         _print_offers_summary(all_listings)
+        _save_classified_matches(classified)
     finally:
         db.close()
 
@@ -205,6 +206,52 @@ def _save_offers_csv(all_listings: list[Listing]) -> None:
             writer.writerow([idx, listing.source, listing.title, price_str, listing.url])
 
     log.info(f"Summary saved to {filepath}")
+
+
+def _save_classified_matches(classified: list[ClassifiedListing]) -> None:
+    log = get_logger("main")
+    matches = sorted(
+        [item for item in classified if item.is_match],
+        key=lambda item: item.listing.price if item.listing.price is not None else float("inf"),
+    )
+    if not matches:
+        log.info("No classifier matches to save.")
+        return
+
+    output_dir = Path("data")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filepath = output_dir / f"matches_{timestamp}.txt"
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "#", "Source", "Title", "Price (R$)", "Confidence",
+            "Brand", "Model", "Capacity (GB)", "Speed (MHz)",
+            "CAS Latency", "Kit", "Condition", "Reason", "URL",
+        ])
+        for idx, item in enumerate(matches, start=1):
+            listing = item.listing
+            price_str = f"{listing.price:.2f}" if listing.price is not None else ""
+            writer.writerow([
+                idx,
+                listing.source,
+                listing.title,
+                price_str,
+                f"{item.confidence:.2f}",
+                item.brand,
+                item.model,
+                item.capacity_gb or "",
+                item.speed_mhz or "",
+                item.cas_latency or "",
+                item.kit_count,
+                listing.condition,
+                item.reason,
+                listing.url,
+            ])
+
+    log.info(f"Classifier matches saved to {filepath} ({len(matches)} listings)")
 
 
 if __name__ == "__main__":

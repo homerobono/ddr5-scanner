@@ -34,22 +34,7 @@ class TerabyteScraper(BaseScraper):
                     "--no-sandbox",
                 ],
             )
-            context = await browser.new_context(
-                user_agent=self.random_ua(),
-                locale="pt-BR",
-                timezone_id="America/Sao_Paulo",
-                viewport={"width": 1920, "height": 1080},
-                extra_http_headers={
-                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                },
-            )
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['pt-BR', 'pt', 'en']
-                });
-            """)
-
+            context = await self._create_stealth_context(browser)
             page = await context.new_page()
 
             for query in self.search_queries:
@@ -71,28 +56,44 @@ class TerabyteScraper(BaseScraper):
         seen_urls: set[str],
     ) -> None:
         url = f"{self.BASE_URL}/busca?str={quote_plus(query)}"
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        if resp and resp.status in (403, 503):
+            self.log.warning(f"Got {resp.status} for '{query}', waiting before retry...")
+            await asyncio.sleep(5)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if resp and resp.status in (403, 503):
+                self.log.warning(f"Still {resp.status} for '{query}', skipping")
+                return
 
         try:
-            await page.wait_for_selector(
-                "#prodarea .pbox, .products-area .pbox",
-                timeout=10000,
-            )
+            await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
-            self.log.debug(f"No product cards found for '{query}'")
-            return
+            pass
+        await asyncio.sleep(2)
 
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(1)
 
         html = await page.content()
+        self._dump_debug_html(html, query)
         soup = BeautifulSoup(html, "lxml")
 
-        products_area = soup.select_one("#prodarea, .products-area")
-        if products_area:
-            cards = products_area.select(".pbox")
-        else:
-            cards = soup.select(".pbox")
+        cards = soup.select(
+            "#prodarea .pbox, .products-area .pbox, .pbox, "
+            "[class*='product-card'], [class*='prod-item'], "
+            "div[data-product-id]"
+        )
+
+        if not cards:
+            cards = soup.select("a[href*='/produto/']")
+            self.log.debug(
+                f"Fallback: found {len(cards)} product links for '{query}'"
+            )
+
+        if not cards:
+            self.log.debug(f"No product cards found for '{query}'")
+            return
 
         for card in cards:
             try:
@@ -108,7 +109,10 @@ class TerabyteScraper(BaseScraper):
         if not link_el:
             link_el = card.select_one("a[href]")
         if not link_el:
-            return None
+            if card.name == "a" and card.get("href"):
+                link_el = card
+            else:
+                return None
 
         href = link_el.get("href", "")
         if not href:
@@ -116,22 +120,28 @@ class TerabyteScraper(BaseScraper):
         if not href.startswith("http"):
             href = f"{self.BASE_URL}{href}"
 
-        title_el = card.select_one("h2.prod-name, .prod-name, h2, a[title]")
+        title_el = card.select_one(
+            "h2.prod-name, .prod-name, h2, h3, a[title], "
+            "[class*='product-name'], [class*='prod-title']"
+        )
         title = title_el.get_text(strip=True) if title_el else ""
         if not title and link_el.get("title"):
             title = link_el["title"]
+        if not title:
+            title = link_el.get_text(strip=True)
         if not title:
             return None
 
         price_el = card.select_one(
             ".prod-new-price span, .prod-new-price, "
-            ".val-prod, .prod-price, .price-destaque"
+            ".val-prod, .prod-price, .price-destaque, "
+            "[class*='price'] span, [class*='price']"
         )
         raw_price = price_el.get_text(strip=True) if price_el else ""
         price = self.parse_brl_price(raw_price)
 
         if not price:
-            for el in card.select("span, div"):
+            for el in card.select("span, div, p"):
                 text = el.get_text(strip=True)
                 if "R$" in text:
                     price = self.parse_brl_price(text)
@@ -139,8 +149,10 @@ class TerabyteScraper(BaseScraper):
                         raw_price = text
                         break
 
-        img_el = card.select_one("img[src]")
-        image_url = img_el["src"] if img_el else ""
+        img_el = card.select_one("img[src], img[data-src]")
+        image_url = ""
+        if img_el:
+            image_url = img_el.get("src") or img_el.get("data-src") or ""
 
         return Listing(
             source="terabyte",
